@@ -11,6 +11,9 @@ const ejs = require('ejs');
 const session = require('express-session')
 const passport = require('passport');
 const passportLocalMongoose = require('passport-local-mongoose');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const findOrCreate = require('mongoose-findorcreate')
+
 
 const app = express();
 
@@ -37,25 +40,55 @@ mongoose.connect('mongodb://localhost:27017/userDB', { useNewUrlParser: true });
 
 const userSchema = new mongoose.Schema({
     email: String,
-    password: String
+    password: String,
+    googleId: String,
+    secret: Array
 })
 //for mongoose- encryption
 //userSchema.plugin(encrypt, { secret: process.env.SECRET, encryptedFields: ['password'] });
 
 userSchema.plugin(passportLocalMongoose);
+userSchema.plugin(findOrCreate);
 
 const User = mongoose.model('User', userSchema);
 
 passport.use(User.createStrategy());
 
-passport.serializeUser(User.serializeUser());
-passport.deserializeUser(User.deserializeUser());
+passport.serializeUser((user, done) => {
+    done(null, user.id);
+});
+passport.deserializeUser((id, done) => {
+    User.findById(id, (err, user) => {
+        done(err, user);
+    })
+});
+
+passport.use(new GoogleStrategy({
+    clientID: process.env.CLIENT_ID,
+    clientSecret: process.env.CLIENT_SECRET,
+    callbackURL: "http://localhost:3000/auth/google/secrets",
+    userProfileURL: "https://www.googleapis.com/oauth2/v3/userinfo"
+},
+    function (accessToken, refreshToken, profile, cb) {
+        User.findOrCreate({ googleId: profile.id }, function (err, user) {
+            return cb(err, user);
+        });
+    }
+));
 
 
 app.get('/', (req, res) => {
     res.render('home')
 })
 
+app.get('/auth/google', passport.authenticate('google', { scope: ['profile'] }))
+
+app.get('/auth/google/secrets',
+    passport.authenticate('google', { failureRedirect: '/login' }),
+    function (req, res) {
+        // Successful authentication, redirect home.
+        res.redirect('/secrets');
+    });
 
 app.get('/login', (req, res) => {
     res.render('login')
@@ -66,16 +99,49 @@ app.get('/register', (req, res) => {
 })
 
 app.get('/secrets', (req, res) => {
+    User.find({ "secret": { $ne: null } }, (err, foundUsers) => {
+        if (err) {
+            console.log(err);
+        }
+        else {
+            if (foundUsers) {
+                res.render("secrets", { userswithSecrets: foundUsers });
+            }
+        }
+    })
+})
 
+app.get('/submit', (req, res) => {
     //if the user is still authenticated( means its cookie is still there and its session is not expired(it has not closed the browser), then it will render the secrets) else we have to login again
     if (req.isAuthenticated()) {
-        res.render('Secrets');
-
+        res.render('submit');
     }
     else {
         res.redirect('/login');
     }
 })
+
+app.post('/submit', (req, res) => {
+    const submittedSecret = req.body.secret;
+    //when we login, passport saves the user detials in the req part
+    console.log(req.user);
+
+    User.findById(req.user._id, (err, foundUser) => {
+        if (err) {
+            console.log(err);
+        }
+        else {
+            if (foundUser) {
+                foundUser.secret.push(submittedSecret);
+                foundUser.save(() => {
+                    res.redirect('/secrets');
+                });
+            }
+        }
+    })
+})
+
+
 app.post('/register', (req, res) => {
 
     User.register({ username: req.body.username }, req.body.password, (err, user) => {
@@ -115,6 +181,7 @@ app.post("/login", function (req, res) {
                     //a the user that was found, which would make it a truthy statement
                     if (user) {
                         //if true, then log the user in, else redirect to login page
+                        console.log("fv");
                         req.login(user, function (err) {
                             res.redirect("/secrets");
                         });
